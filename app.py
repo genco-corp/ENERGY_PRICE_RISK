@@ -28,6 +28,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize the database
+database.initialize()
+
 # Initialize session state variables
 if 'data' not in st.session_state:
     st.session_state.data = None
@@ -45,13 +48,29 @@ if 'decomposition' not in st.session_state:
     st.session_state.decomposition = None
 if 'models' not in st.session_state:
     st.session_state.models = None
+if 'dataset_id' not in st.session_state:
+    st.session_state.dataset_id = None
+if 'forecast_id' not in st.session_state:
+    st.session_state.forecast_id = None
+if 'active_tab' not in st.session_state:
+    st.session_state.active_tab = "Upload"
 
 # Application header
 st.title("⚡ Electricity Price Forecasting")
 st.markdown("""
 This application provides 30-day electricity price forecasts using advanced machine learning techniques.
-Upload your historical price data to get started.
+Upload historical price data or use saved datasets.
 """)
+
+# Create navigation tabs
+nav_tabs = ["Upload & Forecast", "Saved Datasets", "Saved Forecasts"]
+nav_icons = ["📊", "💾", "📈"]
+
+# Add navigation
+cols = st.columns(len(nav_tabs))
+for i, (tab, icon) in enumerate(zip(nav_tabs, nav_icons)):
+    if cols[i].button(f"{icon} {tab}", key=f"nav_{i}", use_container_width=True):
+        st.session_state.active_tab = tab
 
 # Sidebar for inputs and configuration
 with st.sidebar:
@@ -133,135 +152,372 @@ with st.sidebar:
                 mime="text/csv"
             )
 
-# Main content area
-if uploaded_file is not None:
-    try:
-        # Process the uploaded file
-        if uploaded_file.name.endswith('.csv'):
-            data = pd.read_csv(uploaded_file)
-        elif uploaded_file.name.endswith('.json'):
-            data = pd.read_json(uploaded_file)
-        
-        # Validate the data
-        validation_result, validation_message = validate_data(data)
-        
-        if validation_result:
-            st.session_state.data = data
-            st.success("Data uploaded successfully!")
-            
-            # Display dataset info
-            with st.expander("Dataset Overview", expanded=True):
-                st.write(f"**Number of records:** {len(data)}")
-                st.write(f"**Time range:** {data['timestamp'].min()} to {data['timestamp'].max()}")
-                st.write(f"**Columns:** {', '.join(data.columns.tolist())}")
-                st.write("**Sample data:**")
-                st.dataframe(data.head())
-                
-                # Show historical price chart
-                if 'price' in data.columns:
-                    st.plotly_chart(plot_historical_prices(data), use_container_width=True)
-        else:
-            st.error(f"Invalid data format: {validation_message}")
-            st.session_state.data = None
-    except Exception as e:
-        st.error(f"Error processing the file: {str(e)}")
-        st.session_state.data = None
-
-# Process data and generate forecast when the button is clicked
-if st.session_state.data is not None and 'train_button' in locals() and train_button:
-    with st.spinner("Processing data and training models..."):
+# Main content area for Upload & Forecast tab
+if st.session_state.active_tab == "Upload & Forecast":
+    if uploaded_file is not None:
         try:
-            # Preprocess the data
-            processed_data = preprocess_data(st.session_state.data)
-            st.session_state.processed_data = processed_data
+            # Process the uploaded file
+            if uploaded_file.name.endswith('.csv'):
+                data = pd.read_csv(uploaded_file)
+            elif uploaded_file.name.endswith('.json'):
+                data = pd.read_json(uploaded_file)
             
-            # Engineer features
-            features, decomposition = engineer_features(processed_data)
-            st.session_state.features = features
-            st.session_state.decomposition = decomposition
+            # Validate the data
+            validation_result, validation_message = validate_data(data)
             
-            # Initialize and train the forecaster
-            forecaster = ElectricityPriceForecaster(
-                models_to_use=models_to_use,
-                forecast_horizon=forecast_days,
-                confidence_interval=conf_interval
-            )
-            
-            # Train the models and generate forecast
-            forecast, error_metrics, feature_importance = forecaster.train_and_forecast(
-                features, processed_data['price']
-            )
-            
-            # Store the results in session state
-            st.session_state.forecast = forecast
-            st.session_state.error_metrics = error_metrics
-            st.session_state.feature_importance = feature_importance
-            st.session_state.models = forecaster
-            
-            st.success("Models trained and forecast generated successfully!")
+            if validation_result:
+                st.session_state.data = data
+                st.success("Data uploaded successfully!")
+                
+                # Display dataset info
+                with st.expander("Dataset Overview", expanded=True):
+                    st.write(f"**Number of records:** {len(data)}")
+                    st.write(f"**Time range:** {data['timestamp'].min()} to {data['timestamp'].max()}")
+                    st.write(f"**Columns:** {', '.join(data.columns.tolist())}")
+                    st.write("**Sample data:**")
+                    st.dataframe(data.head())
+                    
+                    # Show historical price chart
+                    if 'price' in data.columns:
+                        st.plotly_chart(plot_historical_prices(data), use_container_width=True)
+                    
+                    # Option to save dataset to database
+                    with st.form(key="save_dataset_form"):
+                        st.subheader("Save to Database")
+                        dataset_name = st.text_input("Dataset Name", value=f"Dataset_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                        dataset_description = st.text_area("Description (optional)", 
+                                                         placeholder="Enter a description for this dataset...")
+                        
+                        save_submitted = st.form_submit_button("Save Dataset")
+                        
+                        if save_submitted:
+                            try:
+                                # Save to database
+                                dataset_id = database.save_dataset(data, dataset_name, dataset_description)
+                                st.session_state.dataset_id = dataset_id
+                                st.success(f"Dataset saved to database with ID: {dataset_id}")
+                            except Exception as e:
+                                st.error(f"Error saving dataset to database: {str(e)}")
+            else:
+                st.error(f"Invalid data format: {validation_message}")
+                st.session_state.data = None
         except Exception as e:
-            st.error(f"An error occurred during model training and forecasting: {str(e)}")
+            st.error(f"Error processing the file: {str(e)}")
+            st.session_state.data = None
 
-# Display forecast results if available
-if st.session_state.forecast is not None:
-    st.header("Forecast Results")
-    
-    # Create tabs for different visualizations
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Price Forecast", 
-        "Model Performance", 
-        "Feature Importance", 
-        "Time Series Decomposition"
-    ])
-    
-    with tab1:
-        st.subheader("30-Day Price Forecast")
-        st.plotly_chart(
-            plot_price_forecast(
-                st.session_state.forecast, 
-                st.session_state.processed_data,
-                confidence_interval=st.session_state.models.confidence_interval
-            ),
-            use_container_width=True
-        )
+    # Process data and generate forecast when the button is clicked
+    if st.session_state.data is not None and 'train_button' in locals() and train_button:
+        with st.spinner("Processing data and training models..."):
+            try:
+                # Preprocess the data
+                processed_data = preprocess_data(st.session_state.data)
+                st.session_state.processed_data = processed_data
+                
+                # Engineer features
+                features, decomposition = engineer_features(processed_data)
+                st.session_state.features = features
+                st.session_state.decomposition = decomposition
+                
+                # Initialize and train the forecaster
+                forecaster = ElectricityPriceForecaster(
+                    models_to_use=models_to_use,
+                    forecast_horizon=forecast_days,
+                    confidence_interval=conf_interval
+                )
+                
+                # Train the models and generate forecast
+                forecast, error_metrics, feature_importance = forecaster.train_and_forecast(
+                    features, processed_data['price']
+                )
+                
+                # Store the results in session state
+                st.session_state.forecast = forecast
+                st.session_state.error_metrics = error_metrics
+                st.session_state.feature_importance = feature_importance
+                st.session_state.models = forecaster
+                
+                st.success("Models trained and forecast generated successfully!")
+                
+                # Option to save forecast to database if a dataset_id is available
+                if st.session_state.dataset_id is not None:
+                    with st.form(key="save_forecast_form"):
+                        st.subheader("Save Forecast to Database")
+                        
+                        forecast_name = st.text_input("Forecast Name", 
+                                                   value=f"Forecast_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                        
+                        save_forecast_submitted = st.form_submit_button("Save Forecast")
+                        
+                        if save_forecast_submitted:
+                            try:
+                                # Convert models_to_use from list to list of strings if it's not already
+                                models_list = models_to_use
+                                if "Ensemble (All)" in models_list:
+                                    models_list = ["LSTM", "XGBoost", "Prophet", "Ensemble"]
+                                
+                                # Save forecast to database
+                                forecast_id = database.save_forecast(
+                                    dataset_id=st.session_state.dataset_id,
+                                    forecast_df=forecast,
+                                    error_metrics=error_metrics,
+                                    feature_importance=feature_importance,
+                                    name=forecast_name,
+                                    forecast_horizon=forecast_days,
+                                    confidence_interval=conf_interval,
+                                    models_used=models_list
+                                )
+                                
+                                st.session_state.forecast_id = forecast_id
+                                st.success(f"Forecast saved to database with ID: {forecast_id}")
+                            except Exception as e:
+                                st.error(f"Error saving forecast to database: {str(e)}")
+                else:
+                    st.info("Save the dataset to the database first to enable forecast saving.")
+            except Exception as e:
+                st.error(f"An error occurred during model training and forecasting: {str(e)}")
+
+    # Display forecast results if available
+    if st.session_state.forecast is not None:
+        st.header("Forecast Results")
         
-        # Display forecast data table
-        with st.expander("Forecast Data Table"):
-            st.dataframe(st.session_state.forecast)
-    
-    with tab2:
-        st.subheader("Model Performance Metrics")
-        st.plotly_chart(
-            plot_error_metrics(st.session_state.error_metrics),
-            use_container_width=True
-        )
+        # Create tabs for different visualizations
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "Price Forecast", 
+            "Model Performance", 
+            "Feature Importance", 
+            "Time Series Decomposition"
+        ])
         
-        # Display metrics in table format
-        with st.expander("Detailed Metrics"):
-            st.dataframe(pd.DataFrame(st.session_state.error_metrics))
-    
-    with tab3:
-        st.subheader("Feature Importance Analysis")
-        if st.session_state.feature_importance is not None:
+        with tab1:
+            st.subheader("30-Day Price Forecast")
             st.plotly_chart(
-                plot_feature_importance(st.session_state.feature_importance),
+                plot_price_forecast(
+                    st.session_state.forecast, 
+                    st.session_state.processed_data,
+                    confidence_interval=st.session_state.models.confidence_interval
+                ),
                 use_container_width=True
             )
-        else:
-            st.info("Feature importance analysis is not available for the selected model(s).")
-    
-    with tab4:
-        st.subheader("Time Series Decomposition")
-        if st.session_state.decomposition is not None:
+            
+            # Display forecast data table
+            with st.expander("Forecast Data Table"):
+                st.dataframe(st.session_state.forecast)
+        
+        with tab2:
+            st.subheader("Model Performance Metrics")
             st.plotly_chart(
-                plot_decomposition(st.session_state.decomposition),
+                plot_error_metrics(st.session_state.error_metrics),
                 use_container_width=True
             )
-        else:
-            st.info("Time series decomposition is not available.")
+            
+            # Display metrics in table format
+            with st.expander("Detailed Metrics"):
+                st.dataframe(pd.DataFrame(st.session_state.error_metrics))
+        
+        with tab3:
+            st.subheader("Feature Importance Analysis")
+            if st.session_state.feature_importance is not None:
+                st.plotly_chart(
+                    plot_feature_importance(st.session_state.feature_importance),
+                    use_container_width=True
+                )
+            else:
+                st.info("Feature importance analysis is not available for the selected model(s).")
+        
+        with tab4:
+            st.subheader("Time Series Decomposition")
+            if st.session_state.decomposition is not None:
+                st.plotly_chart(
+                    plot_decomposition(st.session_state.decomposition),
+                    use_container_width=True
+                )
+            else:
+                st.info("Time series decomposition is not available.")
 
-# Initial guidance for new users
-if st.session_state.data is None:
+# Different content based on the active tab
+if st.session_state.active_tab == "Saved Datasets":
+    st.header("💾 Saved Datasets")
+    
+    # Get all datasets from database
+    try:
+        datasets = database.get_all_datasets()
+        
+        if not datasets:
+            st.info("No datasets found in the database. Upload a dataset first.")
+        else:
+            # Display datasets in a table
+            st.write(f"Found {len(datasets)} datasets in the database.")
+            
+            # Create a DataFrame for display
+            dataset_data = []
+            for ds in datasets:
+                dataset_data.append({
+                    "ID": ds.id,
+                    "Name": ds.name,
+                    "Description": ds.description,
+                    "Records": ds.record_count,
+                    "Created": ds.created_at.strftime("%Y-%m-%d %H:%M"),
+                    "Time Range": f"{ds.start_date.strftime('%Y-%m-%d')} to {ds.end_date.strftime('%Y-%m-%d')}",
+                    "External Features": "Yes" if ds.has_external_features else "No"
+                })
+            
+            dataset_df = pd.DataFrame(dataset_data)
+            st.dataframe(dataset_df, use_container_width=True)
+            
+            # Select dataset to load
+            selected_dataset_id = st.selectbox(
+                "Select a dataset to load",
+                options=[ds.id for ds in datasets],
+                format_func=lambda x: f"ID: {x} - {next((ds.name for ds in datasets if ds.id == x), 'Unknown')}"
+            )
+            
+            if st.button("Load Selected Dataset"):
+                with st.spinner("Loading dataset..."):
+                    try:
+                        # Load dataset from database
+                        data = database.get_dataset_data(selected_dataset_id)
+                        
+                        # Set session state
+                        st.session_state.data = data
+                        st.session_state.dataset_id = selected_dataset_id
+                        
+                        # Reset other session variables
+                        st.session_state.processed_data = None
+                        st.session_state.features = None
+                        st.session_state.forecast = None
+                        st.session_state.error_metrics = None
+                        st.session_state.feature_importance = None
+                        st.session_state.decomposition = None
+                        st.session_state.models = None
+                        
+                        # Change tab
+                        st.session_state.active_tab = "Upload & Forecast"
+                        
+                        st.success(f"Dataset loaded successfully! Switched to Upload & Forecast tab.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error loading dataset: {str(e)}")
+            
+            # Option to delete a dataset
+            if st.checkbox("Delete Dataset"):
+                if st.button("Delete Selected Dataset", type="primary", help="This action cannot be undone!"):
+                    try:
+                        success = database.delete_dataset(selected_dataset_id)
+                        if success:
+                            st.success(f"Dataset {selected_dataset_id} deleted successfully!")
+                            # If the deleted dataset was the active one, reset the session state
+                            if st.session_state.dataset_id == selected_dataset_id:
+                                st.session_state.data = None
+                                st.session_state.dataset_id = None
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete dataset.")
+                    except Exception as e:
+                        st.error(f"Error deleting dataset: {str(e)}")
+                        
+    except Exception as e:
+        st.error(f"Error loading datasets from database: {str(e)}")
+
+elif st.session_state.active_tab == "Saved Forecasts":
+    st.header("📈 Saved Forecasts")
+    
+    # Get all forecasts from database
+    try:
+        forecasts = database.get_all_forecasts()
+        
+        if not forecasts:
+            st.info("No forecasts found in the database. Create a forecast first.")
+        else:
+            # Display forecasts in a table
+            st.write(f"Found {len(forecasts)} forecasts in the database.")
+            
+            # Create a DataFrame for display
+            forecast_data = []
+            for f in forecasts:
+                forecast_data.append({
+                    "ID": f.id,
+                    "Name": f.name,
+                    "Dataset ID": f.dataset_id,
+                    "Created": f.created_at.strftime("%Y-%m-%d %H:%M"),
+                    "Horizon (days)": f.forecast_horizon,
+                    "Confidence Interval": f"{f.confidence_interval}%",
+                    "Models": f.models_used
+                })
+            
+            forecast_df = pd.DataFrame(forecast_data)
+            st.dataframe(forecast_df, use_container_width=True)
+            
+            # Select forecast to load
+            selected_forecast_id = st.selectbox(
+                "Select a forecast to load",
+                options=[f.id for f in forecasts],
+                format_func=lambda x: f"ID: {x} - {next((f.name for f in forecasts if f.id == x), 'Unknown')}"
+            )
+            
+            if st.button("Load Selected Forecast"):
+                with st.spinner("Loading forecast..."):
+                    try:
+                        # Load forecast from database
+                        forecast_df, error_metrics, feature_importance = database.get_forecast_data(selected_forecast_id)
+                        
+                        # Get the associated dataset
+                        selected_forecast = next((f for f in forecasts if f.id == selected_forecast_id), None)
+                        if selected_forecast:
+                            data = database.get_dataset_data(selected_forecast.dataset_id)
+                            processed_data = preprocess_data(data)
+                            
+                            # Set session state
+                            st.session_state.data = data
+                            st.session_state.dataset_id = selected_forecast.dataset_id
+                            st.session_state.processed_data = processed_data
+                            st.session_state.forecast = forecast_df
+                            st.session_state.error_metrics = error_metrics
+                            st.session_state.feature_importance = feature_importance
+                            st.session_state.forecast_id = selected_forecast_id
+                            
+                            # Initialize a forecaster object with the loaded parameters
+                            models_list = selected_forecast.models_used.split(',')
+                            forecaster = ElectricityPriceForecaster(
+                                models_to_use=models_list,
+                                forecast_horizon=selected_forecast.forecast_horizon,
+                                confidence_interval=selected_forecast.confidence_interval
+                            )
+                            st.session_state.models = forecaster
+                            
+                            # Change tab
+                            st.session_state.active_tab = "Upload & Forecast"
+                            
+                            st.success(f"Forecast loaded successfully! Switched to Upload & Forecast tab.")
+                            st.rerun()
+                        else:
+                            st.error("Could not find the selected forecast.")
+                    except Exception as e:
+                        st.error(f"Error loading forecast: {str(e)}")
+            
+            # Option to delete a forecast
+            if st.checkbox("Delete Forecast"):
+                if st.button("Delete Selected Forecast", type="primary", help="This action cannot be undone!"):
+                    try:
+                        success = database.delete_forecast(selected_forecast_id)
+                        if success:
+                            st.success(f"Forecast {selected_forecast_id} deleted successfully!")
+                            # If the deleted forecast was the active one, reset the session state
+                            if st.session_state.forecast_id == selected_forecast_id:
+                                st.session_state.forecast = None
+                                st.session_state.error_metrics = None
+                                st.session_state.feature_importance = None
+                                st.session_state.forecast_id = None
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete forecast.")
+                    except Exception as e:
+                        st.error(f"Error deleting forecast: {str(e)}")
+                        
+    except Exception as e:
+        st.error(f"Error loading forecasts from database: {str(e)}")
+
+# Display welcome message if needed
+elif st.session_state.active_tab == "Upload & Forecast" and st.session_state.data is None:
     st.info("""
     ### Getting Started
     1. Upload your historical electricity price data (CSV or JSON format)
@@ -269,6 +525,8 @@ if st.session_state.data is None:
     3. Click on "Train Models & Generate Forecast" to see the results
     
     For optimal forecasting performance, provide at least 1 year of hourly data.
+    
+    You can also load previously saved datasets from the "Saved Datasets" tab.
     """)
 
 # Footer
