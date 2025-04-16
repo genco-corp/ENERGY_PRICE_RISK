@@ -242,11 +242,32 @@ if st.session_state.active_tab == "Upload & Forecast":
                         st.write(f"Starting preprocessing with target frequency: {target_frequency}")
                         processed_data = preprocess_data(st.session_state.data, target_frequency)
                         st.session_state.processed_data = processed_data
-                        st.write("Preprocessing complete!")
+                        st.write(f"Preprocessing complete! Shape: {processed_data.shape}")
+                        
+                        # Verify timestamp is in datetime format
+                        if not pd.api.types.is_datetime64_any_dtype(processed_data['timestamp']):
+                            processed_data['timestamp'] = pd.to_datetime(processed_data['timestamp'])
+                            st.write("Converted timestamp to datetime format")
                 
                         # Engineer features
                         st.write("Starting feature engineering...")
                         features, decomposition = engineer_features(processed_data)
+                        st.write(f"Feature engineering generated {features.shape[1]} features with {features.shape[0]} rows")
+                        
+                        # Identify and handle any NaN values
+                        nan_count = features.isna().sum().sum()
+                        if nan_count > 0:
+                            st.write(f"Found {nan_count} NaN values in features. Cleaning up...")
+                            features = features.fillna(0)
+                            
+                        # Ensure price column from processed_data is aligned with features
+                        st.write(f"Feature index length: {len(features.index)}")
+                        st.write(f"Price series length: {len(processed_data['price'])}")
+                        
+                        # Make sure we're using the processed price data that matches our features
+                        price_data = processed_data.loc[processed_data['timestamp'].isin(features['timestamp']), 'price']
+                        st.write(f"Aligned price data length: {len(price_data)}")
+                        
                         st.session_state.features = features
                         st.session_state.decomposition = decomposition
                         st.write("Feature engineering complete!")
@@ -262,7 +283,7 @@ if st.session_state.active_tab == "Upload & Forecast":
                         # Train the models and generate forecast
                         st.write("Starting model training...")
                         forecast, error_metrics, feature_importance = forecaster.train_and_forecast(
-                            features, processed_data['price']
+                            features, price_data
                         )
                         
                         # Store the results in session state

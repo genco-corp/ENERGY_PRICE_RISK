@@ -8,7 +8,25 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
 from xgboost import XGBRegressor
 import warnings
+from datetime import timedelta
 warnings.filterwarnings('ignore')
+
+# Add debug function for tracking dataframe issues
+def print_debug(message, df=None):
+    """Print debug information about dataframes"""
+    print(f"DEBUG: {message}")
+    if df is not None:
+        print(f"  Shape: {df.shape}")
+        print(f"  Index length: {len(df.index)}")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            if 'timestamp' in df.columns:
+                print(f"  First timestamp: {df['timestamp'].min()}")
+                print(f"  Last timestamp: {df['timestamp'].max()}")
+            print(f"  First 5 columns: {df.columns[:5].tolist()}")
+            print(f"  Has NaN: {df.isna().any().any()}")
+            if df.isna().any().any():
+                print(f"  NaN count: {df.isna().sum().sum()}")
+        print("-" * 40)
 
 # Try to import Prophet, but handle if it's not available
 try:
@@ -112,6 +130,30 @@ class ElectricityPriceForecaster:
         Returns:
             tuple: (forecast_df, error_metrics, feature_importance)
         """
+        # Print debug information
+        print_debug("Features dataframe", features)
+        print_debug("Prices series", prices)
+        
+        # Make sure prices is the right length
+        if len(prices) != len(features):
+            print(f"Length mismatch: features={len(features)}, prices={len(prices)}")
+            print("Aligning prices with features...")
+            # If prices are provided as Series with index, align it with features index
+            if isinstance(prices, pd.Series) and hasattr(prices, 'index'):
+                prices = prices.reindex(features.index)
+            # If provided as array-like, truncate or pad to match features length
+            else:
+                if len(prices) > len(features):
+                    print(f"Truncating prices from {len(prices)} to {len(features)}")
+                    prices = prices[:len(features)]
+                elif len(prices) < len(features):
+                    print(f"Padding prices from {len(prices)} to {len(features)}")
+                    # For simplicity, we'll pad with the last value
+                    padding = [prices.iloc[-1]] * (len(features) - len(prices))
+                    prices = pd.Series(list(prices) + padding)
+            
+            print(f"After alignment: features={len(features)}, prices={len(prices)}")
+            
         # Split data into train/test sets
         train_data, test_data = self._split_train_test(features, prices)
         
