@@ -168,9 +168,12 @@ def resample_to_frequency(df, target_freq='H'):
     
     # If target frequency is 5-minute
     elif target_freq == '5T':
-        # If frequency is coarser than 5min (e.g., hourly), interpolate to 5min
-        if inferred_freq is not None and (inferred_freq[-1] in ['H', 'D'] or
-                                        (inferred_freq[-1] == 'T' and int(inferred_freq[:-1]) > 5)):
+        # If data is already in 5-minute frequency, no resampling needed
+        if inferred_freq == '5T':
+            pass
+        # If frequency is coarser than 5min, interpolate to 5min
+        elif inferred_freq is not None and (inferred_freq[-1] in ['H', 'D'] or
+                                          (inferred_freq[-1] == 'T' and int(inferred_freq[:-1]) > 5)):
             df = df.resample('5T').interpolate(method='time')
         # If frequency is finer than 5min, resample to 5min
         elif inferred_freq is not None and inferred_freq[-1] == 'T' and int(inferred_freq[:-1]) < 5:
