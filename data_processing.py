@@ -28,7 +28,15 @@ def validate_data(data):
     try:
         # Convert timestamp column to datetime if it's not already
         if not pd.api.types.is_datetime64_any_dtype(data['timestamp']):
-            data['timestamp'] = pd.to_datetime(data['timestamp'])
+            # Try parsing with multiple formats including "m/d/yy h:mm"
+            try:
+                data['timestamp'] = pd.to_datetime(data['timestamp'])
+            except:
+                try:
+                    # Try with format m/d/yy h:mm
+                    data['timestamp'] = pd.to_datetime(data['timestamp'], format='%m/%d/%y %H:%M')
+                except Exception as e2:
+                    return False, f"Error converting timestamp with format 'm/d/yy h:mm': {str(e2)}"
     except Exception as e:
         return False, f"Error converting timestamp column to datetime: {str(e)}"
     
@@ -63,7 +71,16 @@ def preprocess_data(data):
     
     # Convert timestamp to datetime if needed
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        try:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        except:
+            try:
+                # Try with format m/d/yy h:mm
+                df['timestamp'] = pd.to_datetime(df['timestamp'], format='%m/%d/%y %H:%M')
+            except Exception as e:
+                print(f"Error converting timestamp format: {str(e)}")
+                # Fall back to trying force parse as last resort
+                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     
     # Set timestamp as index
     df.set_index('timestamp', inplace=True)

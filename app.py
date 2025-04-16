@@ -67,7 +67,9 @@ with st.sidebar:
     with st.expander("Expected Data Format"):
         st.markdown("""
         Your data should have the following columns:
-        - **timestamp**: Date and time in ISO format (YYYY-MM-DD HH:MM:SS)
+        - **timestamp**: Date and time in one of these formats:
+          - ISO format (YYYY-MM-DD HH:MM:SS)
+          - m/d/yy h:mm (e.g., 1/24/24 0:05)
         - **price**: Electricity price value
         
         Optional columns:
@@ -77,11 +79,17 @@ with st.sidebar:
         - **precipitation**: Precipitation value
         - **load**: System load value
         
-        Example:
+        Examples:
         ```
+        # ISO format example:
         timestamp,price,temperature
         2022-01-01 00:00:00,45.2,12.5
         2022-01-01 01:00:00,42.8,12.1
+        
+        # m/d/yy h:mm format example:
+        timestamp,price
+        1/24/24 0:05,42.5
+        1/24/24 0:10,43.2
         ...
         ```
         """)
