@@ -388,18 +388,49 @@ class ElectricityPriceForecaster:
         # Get the last timestamp in the forecast
         last_timestamp = pd.to_datetime(forecast_df['timestamp'].max())
         
-        # Calculate number of hours to forecast
-        hours_to_forecast = self.forecast_horizon * 24
+        # Determine data frequency from the timestamps in features
+        timestamps = pd.to_datetime(features['timestamp'])
+        time_deltas = timestamps.diff().dropna()
         
-        # Create dataframe with future timestamps
-        future_timestamps = [last_timestamp + timedelta(hours=h+1) for h in range(hours_to_forecast)]
+        # Detect if we're working with 5-minute or hourly data
+        if len(time_deltas) > 0:
+            most_common_delta = time_deltas.dt.total_seconds().value_counts().idxmax()
+            
+            if most_common_delta == 300:  # 5 minutes = 300 seconds
+                frequency = '5T'
+                periods_per_day = 288  # 12 * 24 = 288 five-minute periods per day
+                timedelta_unit = 'minutes'
+                timedelta_value = 5
+            else:
+                frequency = 'H'
+                periods_per_day = 24  # 24 hours per day
+                timedelta_unit = 'hours'
+                timedelta_value = 1
+        else:
+            # Default to hourly if we can't determine
+            frequency = 'H'
+            periods_per_day = 24
+            timedelta_unit = 'hours'
+            timedelta_value = 1
+        
+        print(f"Extending forecast with detected frequency: {frequency} ({periods_per_day} periods per day)")
+        
+        # Calculate number of periods to forecast based on frequency
+        periods_to_forecast = self.forecast_horizon * periods_per_day
+        
+        # Create dataframe with future timestamps using appropriate frequency
+        if timedelta_unit == 'minutes':
+            future_timestamps = [last_timestamp + timedelta(minutes=(i+1)*timedelta_value) for i in range(periods_to_forecast)]
+        else:
+            future_timestamps = [last_timestamp + timedelta(hours=(i+1)*timedelta_value) for i in range(periods_to_forecast)]
+            
         future_df = pd.DataFrame({'timestamp': future_timestamps})
         
         # Use the best performing model for future forecasting
         best_model = self._identify_best_model(forecast_df)
         
         # Generate features for future timestamps
-        future_features = self._generate_future_features(features, future_timestamps, forecast_df)
+        future_features = self._generate_future_features(features, future_timestamps, forecast_df, frequency=frequency)
         
         # Generate future predictions using the best model
         if best_model == "LSTM":
@@ -458,8 +489,16 @@ class ElectricityPriceForecaster:
         
         return best_model
     
-    def _generate_future_features(self, features, future_timestamps, forecast_df):
-        """Generate features for future timestamps"""
+    def _generate_future_features(self, features, future_timestamps, forecast_df, frequency='H'):
+        """
+        Generate features for future timestamps
+        
+        Args:
+            features (pd.DataFrame): Original features dataframe
+            future_timestamps (list): List of future timestamps
+            forecast_df (pd.DataFrame): Forecast dataframe
+            frequency (str): Data frequency ('H' for hourly, '5T' for 5-minute)
+        """
         # Create a dataframe with basic temporal features
         future_features = pd.DataFrame({'timestamp': future_timestamps})
         future_features['hour'] = future_features['timestamp'].dt.hour
@@ -485,6 +524,16 @@ class ElectricityPriceForecaster:
                                               (future_features['hour'] <= 18) & 
                                               (~future_features['is_weekend'])).astype(int)
         
+        # Set frequency-specific parameters
+        if frequency == '5T':
+            periods_per_hour = 12
+            periods_per_day = 288  # 24 hours * 12 periods per hour
+            print(f"Using 5-minute frequency for future feature generation (1 day = {periods_per_day} periods)")
+        else:
+            periods_per_hour = 1
+            periods_per_day = 24  # 24 hours per day
+            print(f"Using hourly frequency for future feature generation (1 day = {periods_per_day} periods)")
+        
         # For lag features, use the latest actual and predicted values
         # We'll need to create a combined dataframe of historical and predicted prices
         historical_df = features[['timestamp', 'price']].copy()
@@ -507,29 +556,38 @@ class ElectricityPriceForecaster:
                 # Feature already generated
                 future_X[col] = future_features[col].values
             elif 'lag' in col:
-                # This is a lag feature, handle it by shifting values from the combined dataframe
-                lag_hours = 0
+                # Parse the lag information from the column name
+                lag_periods = 0
+                
+                # Handle hourly lags (adjust for frequency)
                 if 'lag_1h' in col:
-                    lag_hours = 1
+                    lag_periods = 1 * periods_per_hour
                 elif 'lag_3h' in col:
-                    lag_hours = 3
+                    lag_periods = 3 * periods_per_hour
                 elif 'lag_6h' in col:
-                    lag_hours = 6
+                    lag_periods = 6 * periods_per_hour
                 elif 'lag_12h' in col:
-                    lag_hours = 12
+                    lag_periods = 12 * periods_per_hour
                 elif 'lag_24h' in col:
-                    lag_hours = 24
+                    lag_periods = 24 * periods_per_hour
+                # Handle daily lags (adjust for frequency)
                 elif 'lag_7d' in col:
-                    lag_hours = 24 * 7
+                    lag_periods = 7 * periods_per_day
                 elif 'lag_14d' in col:
-                    lag_hours = 24 * 14
+                    lag_periods = 14 * periods_per_day
                 elif 'lag_30d' in col:
-                    lag_hours = 24 * 30
+                    lag_periods = 30 * periods_per_day
+                
+                # Calculate proper time delta based on frequency
+                if frequency == '5T':
+                    time_delta = pd.Timedelta(minutes=5 * lag_periods)
+                else:
+                    time_delta = pd.Timedelta(hours=lag_periods)
                 
                 # For each future timestamp, find the appropriate lagged value
                 lagged_values = []
                 for ts in future_timestamps:
-                    lag_ts = ts - timedelta(hours=lag_hours)
+                    lag_ts = ts - time_delta
                     lag_value = combined_df[combined_df['timestamp'] <= lag_ts]['price'].iloc[-1] if not combined_df[combined_df['timestamp'] <= lag_ts].empty else np.nan
                     lagged_values.append(lag_value)
                 
