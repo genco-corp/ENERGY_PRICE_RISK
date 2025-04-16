@@ -2,11 +2,11 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
-from xgboost import XGBRegressor
 import warnings
 from datetime import timedelta
 warnings.filterwarnings('ignore')
@@ -28,32 +28,26 @@ def print_debug(message, df=None):
                 print(f"  NaN count: {df.isna().sum().sum()}")
         print("-" * 40)
 
-# Try to import Prophet, but handle if it's not available
-try:
-    from prophet import Prophet
-    prophet_available = True
-except ImportError:
-    prophet_available = False
-    print("Prophet not available. Prophet model will be skipped.")
-
 class LSTMModel(nn.Module):
-    """LSTM model for time series forecasting"""
+    """LSTM model for time series forecasting with advanced configuration"""
     
-    def __init__(self, input_dim, hidden_dim=128, num_layers=2, output_dim=1, dropout=0.2):
+    def __init__(self, input_dim, hidden_dim=750, num_layers=3, sequence_length=72, output_dim=1, dropout=0.3):
         """
         Initialize LSTM model
         
         Args:
             input_dim (int): Number of input features
-            hidden_dim (int): Dimension of hidden state
-            num_layers (int): Number of LSTM layers
+            hidden_dim (int): Dimension of hidden state (750 units)
+            num_layers (int): Number of LSTM layers (3 layers)
+            sequence_length (int): Length of input sequence (72 time steps)
             output_dim (int): Dimension of output (usually 1 for forecasting)
-            dropout (float): Dropout rate
+            dropout (float): Dropout rate (0.3)
         """
         super(LSTMModel, self).__init__()
         
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.sequence_length = sequence_length
         
         # LSTM layers
         self.lstm = nn.LSTM(
@@ -92,15 +86,14 @@ class LSTMModel(nn.Module):
 
 class ElectricityPriceForecaster:
     """
-    Class for electricity price forecasting using ensemble methods
+    Class for electricity price forecasting using LSTM with advanced configuration
     """
     
-    def __init__(self, models_to_use=None, forecast_horizon=7, confidence_interval=90):
+    def __init__(self, forecast_horizon=7, confidence_interval=90):
         """
         Initialize the forecaster
         
         Args:
-            models_to_use (list): List of models to use for forecasting
             forecast_horizon (int): Number of days to forecast
             confidence_interval (int): Confidence interval percentage
         """
@@ -108,16 +101,15 @@ class ElectricityPriceForecaster:
         self.confidence_interval = confidence_interval
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Set default to ensemble if not specified
-        if models_to_use is None or "Ensemble (All)" in models_to_use:
-            self.models_to_use = ["LSTM", "XGBoost", "Prophet"] if prophet_available else ["LSTM", "XGBoost"]
-        else:
-            self.models_to_use = [model for model in models_to_use if model != "Ensemble (All)"]
+        # LSTM uses fixed sequence length of 72 time steps
+        self.sequence_length = 72
         
-        # Initialize models and scalers
-        self.models = {}
-        self.scalers = {}
-        self.feature_importance = {}
+        # Initialize model and scalers
+        self.model = None
+        self.scaler_X = None
+        self.scaler_y = None
+        self.recent_actual_prices = []
+        self.feature_names = []
     
     def train_and_forecast(self, features, prices):
         """
@@ -185,36 +177,13 @@ class ElectricityPriceForecaster:
         # Split data into train/test sets
         train_data, test_data = self._split_train_test(features, prices)
         
-        # Initialize forecasts dictionary to store results from each model
-        forecasts = {}
-        error_metrics = {}
-        feature_importance = {}
+        # Train LSTM model and generate forecasts
+        forecast_df, error_metrics = self._train_lstm(train_data, test_data)
         
-        # Train each selected model and generate forecasts
-        for model_name in self.models_to_use:
-            if model_name == "LSTM":
-                forecasts[model_name], error_metrics[model_name], _ = self._train_lstm(train_data, test_data)
-            elif model_name == "XGBoost":
-                forecasts[model_name], error_metrics[model_name], feature_importance[model_name] = self._train_xgboost(train_data, test_data)
-            elif model_name == "Prophet" and prophet_available:
-                forecasts[model_name], error_metrics[model_name], _ = self._train_prophet(train_data, test_data)
-        
-        # Generate ensemble forecast if multiple models are used
-        if len(forecasts) > 1:
-            forecast_df, ensemble_metrics = self._create_ensemble_forecast(forecasts, test_data)
-            error_metrics["Ensemble"] = ensemble_metrics
-        else:
-            # If only one model is used, use its forecast
-            model_name = list(forecasts.keys())[0]
-            forecast_df = forecasts[model_name]
-            
-        # Store feature importance
-        self.feature_importance = feature_importance
-        
-        # Extend forecast to the full forecast horizon (30 days)
+        # Extend forecast to the full forecast horizon
         full_forecast = self._extend_forecast(forecast_df, features)
         
-        return full_forecast, error_metrics, feature_importance
+        return full_forecast, error_metrics, None
     
     def _split_train_test(self, features, prices):
         """Split data into training and testing sets"""
@@ -251,24 +220,40 @@ class ElectricityPriceForecaster:
         
         return train_data, test_data
     
+    def _prepare_sequence_data(self, X, y, sequence_length=72):
+        """Prepare sequence data for LSTM"""
+        n_samples = len(X) - sequence_length
+        
+        # Initialize arrays for sequences and targets
+        X_seq = np.zeros((n_samples, sequence_length, X.shape[1]))
+        y_seq = np.zeros(n_samples)
+        
+        # Create sequences
+        for i in range(n_samples):
+            X_seq[i] = X[i:i+sequence_length]
+            y_seq[i] = y[i+sequence_length]
+        
+        return X_seq, y_seq
+    
     def _train_lstm(self, train_data, test_data):
-        """Train LSTM model and generate forecast"""
+        """Train LSTM model with advanced configuration and learning rate scheduler"""
         # Scale features
-        scaler_X = StandardScaler()
-        scaler_y = StandardScaler()
+        self.scaler_X = StandardScaler()
+        self.scaler_y = StandardScaler()
         
-        X_train_scaled = scaler_X.fit_transform(train_data['X'])
-        y_train_scaled = scaler_y.fit_transform(train_data['y'].values.reshape(-1, 1))
+        X_train_scaled = self.scaler_X.fit_transform(train_data['X'])
+        y_train_scaled = self.scaler_y.fit_transform(train_data['y'].values.reshape(-1, 1)).flatten()
         
-        X_test_scaled = scaler_X.transform(test_data['X'])
+        X_test_scaled = self.scaler_X.transform(test_data['X'])
         
-        # Store scalers
-        self.scalers['LSTM'] = {'X': scaler_X, 'y': scaler_y}
+        # Prepare sequence data
+        X_train_seq, y_train_seq = self._prepare_sequence_data(
+            X_train_scaled, y_train_scaled, self.sequence_length
+        )
         
         # Convert to PyTorch tensors
-        X_train_tensor = torch.FloatTensor(X_train_scaled)
-        y_train_tensor = torch.FloatTensor(y_train_scaled)
-        X_test_tensor = torch.FloatTensor(X_test_scaled)
+        X_train_tensor = torch.FloatTensor(X_train_seq)
+        y_train_tensor = torch.FloatTensor(y_train_seq.reshape(-1, 1))
         
         # Create dataset and dataloader for batch training
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
@@ -276,70 +261,77 @@ class ElectricityPriceForecaster:
         
         # Define and initialize the model
         input_dim = X_train_scaled.shape[1]
-        model = LSTMModel(input_dim).to(self.device)
+        self.model = LSTMModel(
+            input_dim=input_dim,
+            hidden_dim=750,
+            num_layers=3,
+            sequence_length=self.sequence_length,
+            dropout=0.3
+        ).to(self.device)
         
         # Define loss function and optimizer
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         
-        # Training loop
-        epochs = 50
+        # Learning rate scheduler - reduce LR by 0.1 every 30 epochs
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+        
+        # Training loop - increased to 100 epochs
+        epochs = 100
+        print(f"Training LSTM model on {epochs} epochs with {len(train_loader)} batches per epoch")
+        
         for epoch in range(epochs):
-            model.train()
+            self.model.train()
+            total_loss = 0.0
+            
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 
                 # Forward pass
-                outputs = model(X_batch.unsqueeze(1))
+                outputs = self.model(X_batch)
                 loss = criterion(outputs, y_batch)
                 
                 # Backward pass and optimize
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                
+                total_loss += loss.item()
+            
+            # Update learning rate
+            scheduler.step()
+            
+            # Print progress
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss/len(train_loader):.6f}, LR: {scheduler.get_last_lr()[0]:.6f}")
         
-        # Generate predictions
-        model.eval()
+        # Generate predictions on test data
+        self.model.eval()
+        
+        # We need to create sequences from the test data
+        # For simplicity, we'll use the last sequence_length elements from training data + test data
+        full_X = np.vstack([X_train_scaled[-self.sequence_length:], X_test_scaled])
+        predictions = []
+        
         with torch.no_grad():
-            X_test_tensor = X_test_tensor.to(self.device)
-            predictions_scaled = model(X_test_tensor.unsqueeze(1))
-            predictions_scaled = predictions_scaled.cpu().numpy()
+            for i in range(len(X_test_scaled)):
+                # Get sequence
+                seq = full_X[i:i+self.sequence_length]
+                seq_tensor = torch.FloatTensor(seq).unsqueeze(0).to(self.device)
+                
+                # Generate prediction
+                pred = self.model(seq_tensor)
+                predictions.append(pred.item())
+                
+                # Update full_X with the prediction (if needed for next iteration)
+                if i + self.sequence_length < len(full_X):
+                    # We won't actually use this prediction in the next sequence
+                    # This is just to demonstrate how it would work in a recurrent fashion
+                    pass
         
-        # Inverse transform to get actual values
-        predictions = scaler_y.inverse_transform(predictions_scaled)
-        
-        # Create forecast dataframe
-        forecast_df = pd.DataFrame({
-            'timestamp': test_data['timestamps'],
-            'actual': test_data['y'].values,
-            'predicted': predictions.flatten()
-        })
-        
-        # Calculate error metrics
-        error_metrics = self._calculate_metrics(forecast_df['actual'], forecast_df['predicted'])
-        
-        # Store the trained model
-        self.models['LSTM'] = model
-        
-        return forecast_df, error_metrics, None
-    
-    def _train_xgboost(self, train_data, test_data):
-        """Train XGBoost model and generate forecast"""
-        # Initialize XGBoost model
-        model = XGBRegressor(
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42
-        )
-        
-        # Train the model
-        model.fit(train_data['X'], train_data['y'])
-        
-        # Generate predictions
-        predictions = model.predict(test_data['X'])
+        # Convert predictions to numpy array and inverse transform
+        predictions_scaled = np.array(predictions).reshape(-1, 1)
+        predictions = self.scaler_y.inverse_transform(predictions_scaled).flatten()
         
         # Create forecast dataframe
         forecast_df = pd.DataFrame({
@@ -348,162 +340,16 @@ class ElectricityPriceForecaster:
             'predicted': predictions
         })
         
-        # Calculate error metrics
-        error_metrics = self._calculate_metrics(forecast_df['actual'], forecast_df['predicted'])
-        
-        # Get feature importance
-        feature_importance = pd.DataFrame({
-            'feature': train_data['X'].columns,
-            'importance': model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        # Store the trained model
-        self.models['XGBoost'] = model
-        
-        return forecast_df, error_metrics, feature_importance
-    
-    def _train_prophet(self, train_data, test_data):
-        """Train Prophet model and generate forecast"""
-        if not prophet_available:
-            return None, None, None
-        
-        # Prepare data for Prophet
-        # Prophet requires 'ds' (date) and 'y' (target) columns
-        train_prophet = pd.DataFrame({
-            'ds': pd.to_datetime(train_data['X'].index),
-            'y': train_data['y'].values
-        })
-        
-        # Check for valid price ranges and log warnings
-        min_price = np.min(train_data['y'].values)
-        max_price = np.max(train_data['y'].values)
-        print(f"Training price range: min={min_price}, max={max_price}")
-        
-        if min_price < -1000 or max_price > 1000:
-            print("WARNING: Price values seem to be outside normal range for electricity prices!")
-            
-            # If prices are extremely large, this could indicate a scaling issue
-            if min_price < -10000 or max_price > 10000:
-                print("WARNING: Price values are extremely large, applying scaling correction")
-        
-        # Initialize and train Prophet model
-        model = Prophet(
-            seasonality_mode='multiplicative',
-            daily_seasonality=True,
-            weekly_seasonality=True,
-            yearly_seasonality=True,
-            changepoint_prior_scale=0.1
-        )
-        
-        # Add custom seasonalities
-        model.add_seasonality(name='hourly', period=24, fourier_order=5)
-        
-        # Fit the model
-        model.fit(train_prophet)
-        
-        # Create future dataframe for prediction
-        future = pd.DataFrame({'ds': pd.to_datetime(test_data['timestamps'])})
-        
-        # Generate forecast
-        forecast = model.predict(future)
-        
-        # Verify prediction values are in a reasonable range
-        min_pred = np.min(forecast['yhat'].values)
-        max_pred = np.max(forecast['yhat'].values)
-        print(f"Raw prediction range: min={min_pred}, max={max_pred}")
-        
-        # If predictions are outside a reasonable range, apply correction
-        if min_pred < -1000 or max_pred > 1000:
-            print("WARNING: Predictions outside normal range, applying correction")
-            # If predictions are way off, something is wrong with the model scaling
-            # Apply a simple correction based on the actual vs predicted values
-            actual_mean = np.mean(test_data['y'].values)
-            pred_mean = np.mean(forecast['yhat'].values)
-            
-            # Calculate correction factor
-            if abs(pred_mean) > 1e10:  # If predictions are extremely large
-                print(f"Extreme prediction values detected (mean={pred_mean})")
-                # For extreme values, replace with reasonable predictions
-                corrected_yhat = np.array(test_data['y'].values)  # Use actual values
-                # Add small random variations for future predictions
-                corrected_yhat = corrected_yhat * (1 + np.random.normal(0, 0.05, len(corrected_yhat)))
-                
-                # Also correct confidence intervals
-                corrected_lower = corrected_yhat * 0.9  # 10% below predictions
-                corrected_upper = corrected_yhat * 1.1  # 10% above predictions
-                
-                print(f"Applied extreme correction, new prediction range: {np.min(corrected_yhat)} to {np.max(corrected_yhat)}")
-            else:
-                # For less extreme cases, apply scaling correction
-                correction_factor = actual_mean / pred_mean if pred_mean != 0 else 1.0
-                print(f"Applied scaling correction factor: {correction_factor}")
-                
-                corrected_yhat = forecast['yhat'].values * correction_factor
-                corrected_lower = forecast['yhat_lower'].values * correction_factor
-                corrected_upper = forecast['yhat_upper'].values * correction_factor
-        else:
-            # Predictions look reasonable, use them directly
-            corrected_yhat = forecast['yhat'].values
-            corrected_lower = forecast['yhat_lower'].values
-            corrected_upper = forecast['yhat_upper'].values
-        
-        # Create forecast dataframe with corrected values
-        forecast_df = pd.DataFrame({
-            'timestamp': test_data['timestamps'],
-            'actual': test_data['y'].values,
-            'predicted': corrected_yhat
-        })
-        
-        # Calculate confidence intervals with corrected values
-        forecast_df['lower'] = corrected_lower
-        forecast_df['upper'] = corrected_upper
+        # Calculate confidence intervals
+        z_score = 1.96  # 95% confidence interval
+        std_dev = np.std(forecast_df['actual'] - forecast_df['predicted'])
+        forecast_df['lower'] = forecast_df['predicted'] - z_score * std_dev
+        forecast_df['upper'] = forecast_df['predicted'] + z_score * std_dev
         
         # Calculate error metrics
         error_metrics = self._calculate_metrics(forecast_df['actual'], forecast_df['predicted'])
         
-        # Store the trained model
-        self.models['Prophet'] = model
-        
-        return forecast_df, error_metrics, None
-    
-    def _create_ensemble_forecast(self, forecasts, test_data):
-        """Create ensemble forecast by averaging predictions from multiple models"""
-        # Initialize ensemble forecast dataframe
-        ensemble_df = pd.DataFrame({
-            'timestamp': test_data['timestamps'],
-            'actual': test_data['y'].values
-        })
-        
-        # Calculate average prediction across all models
-        predictions = np.zeros(len(test_data['y']))
-        lowers = np.zeros(len(test_data['y']))
-        uppers = np.zeros(len(test_data['y']))
-        
-        model_count = 0
-        for model_name, forecast_df in forecasts.items():
-            predictions += forecast_df['predicted'].values
-            model_count += 1
-            
-            # Store individual model predictions in ensemble dataframe
-            ensemble_df[f'{model_name}_pred'] = forecast_df['predicted'].values
-            
-            # If the model has confidence intervals, use them
-            if 'lower' in forecast_df.columns and 'upper' in forecast_df.columns:
-                lowers += forecast_df['lower'].values
-                uppers += forecast_df['upper'].values
-        
-        # Calculate ensemble predictions as the average
-        ensemble_df['predicted'] = predictions / model_count
-        
-        # Calculate ensemble confidence intervals if available
-        if 'lower' in forecasts[list(forecasts.keys())[0]].columns:
-            ensemble_df['lower'] = lowers / model_count
-            ensemble_df['upper'] = uppers / model_count
-        
-        # Calculate error metrics
-        error_metrics = self._calculate_metrics(ensemble_df['actual'], ensemble_df['predicted'])
-        
-        return ensemble_df, error_metrics
+        return forecast_df, error_metrics
     
     def _extend_forecast(self, forecast_df, features):
         """Extend forecast to cover the full forecast horizon"""
@@ -548,22 +394,11 @@ class ElectricityPriceForecaster:
             
         future_df = pd.DataFrame({'timestamp': future_timestamps})
         
-        # Use the best performing model for future forecasting
-        best_model = self._identify_best_model(forecast_df)
-        
         # Generate features for future timestamps
         future_features = self._generate_future_features(features, future_timestamps, forecast_df, frequency=frequency)
         
-        # Generate future predictions using the best model
-        if best_model == "LSTM":
-            future_predictions, lower_bound, upper_bound = self._forecast_lstm(future_features)
-        elif best_model == "XGBoost":
-            future_predictions, lower_bound, upper_bound = self._forecast_xgboost(future_features)
-        elif best_model == "Prophet" and prophet_available:
-            future_predictions, lower_bound, upper_bound = self._forecast_prophet(future_timestamps)
-        else:
-            # Default to XGBoost if best model is unavailable
-            future_predictions, lower_bound, upper_bound = self._forecast_xgboost(future_features)
+        # Generate future predictions using LSTM model
+        future_predictions, lower_bound, upper_bound = self._forecast_lstm_future(future_features)
         
         # Add predictions to future dataframe
         future_df['predicted'] = future_predictions
@@ -575,41 +410,6 @@ class ElectricityPriceForecaster:
         combined_df = pd.concat([forecast_df, future_df], ignore_index=True)
         
         return combined_df
-    
-    def _identify_best_model(self, forecast_df):
-        """Identify the best performing model based on forecast accuracy"""
-        # If Ensemble is used, just return it
-        if "Ensemble_pred" in forecast_df.columns:
-            return "Ensemble"
-        
-        # If only one model is used, return it
-        if len(self.models_to_use) == 1:
-            return self.models_to_use[0]
-        
-        # Otherwise, compare model performance
-        best_model = None
-        lowest_mape = float('inf')
-        
-        for model_name in self.models_to_use:
-            if f"{model_name}_pred" in forecast_df.columns:
-                actual = forecast_df['actual']
-                predicted = forecast_df[f"{model_name}_pred"]
-                
-                # Calculate MAPE
-                mape = mean_absolute_percentage_error(actual, predicted)
-                
-                if mape < lowest_mape:
-                    lowest_mape = mape
-                    best_model = model_name
-        
-        # If no best model found, default to XGBoost or the first available model
-        if best_model is None:
-            if "XGBoost" in self.models_to_use:
-                best_model = "XGBoost"
-            else:
-                best_model = self.models_to_use[0]
-        
-        return best_model
     
     def _generate_future_features(self, features, future_timestamps, forecast_df, frequency='H'):
         """
@@ -692,160 +492,116 @@ class ElectricityPriceForecaster:
                     lag_periods = 12 * periods_per_hour
                 elif 'lag_24h' in col:
                     lag_periods = 24 * periods_per_hour
-                # Handle daily lags (adjust for frequency)
+                elif 'lag_48h' in col:
+                    lag_periods = 48 * periods_per_hour
+                elif 'lag_72h' in col:
+                    lag_periods = 72 * periods_per_hour
+                elif 'lag_1d' in col:
+                    lag_periods = 1 * periods_per_day
                 elif 'lag_7d' in col:
                     lag_periods = 7 * periods_per_day
-                elif 'lag_14d' in col:
-                    lag_periods = 14 * periods_per_day
-                elif 'lag_30d' in col:
-                    lag_periods = 30 * periods_per_day
                 
-                # Calculate proper time delta based on frequency
-                if frequency == '5T':
-                    time_delta = pd.Timedelta(minutes=5 * lag_periods)
-                else:
-                    time_delta = pd.Timedelta(hours=lag_periods)
-                
-                # For each future timestamp, find the appropriate lagged value
-                lagged_values = []
-                for ts in future_timestamps:
-                    lag_ts = ts - time_delta
-                    lag_value = combined_df[combined_df['timestamp'] <= lag_ts]['price'].iloc[-1] if not combined_df[combined_df['timestamp'] <= lag_ts].empty else np.nan
-                    lagged_values.append(lag_value)
-                
-                future_X[col] = lagged_values
+                # If we can determine the lag periods, generate the lag feature
+                if lag_periods > 0:
+                    # Get the values to use for lag features
+                    values = list(combined_df['price'].values)
+                    
+                    # Generate lag values
+                    lag_values = []
+                    for i in range(len(future_timestamps)):
+                        # Index to retrieve from the combined historical + predicted values
+                        # Start with the last value in the existing data + position in the future data
+                        idx = len(historical_df) + i - lag_periods
+                        
+                        # Handle edge cases
+                        if idx < 0:
+                            # Not enough history, use the earliest value
+                            lag_value = values[0]
+                        elif idx >= len(values):
+                            # Beyond the values we have, use the latest value
+                            lag_value = values[-1]
+                        else:
+                            # Within range, use the exact value
+                            lag_value = values[idx]
+                        
+                        lag_values.append(lag_value)
+                    
+                    # Add to future features
+                    future_X[col] = lag_values
             elif 'rolling' in col:
-                # This is a rolling feature, propagate the last value from historical data
-                future_X[col] = features[col].iloc[-1] if col in features.columns else np.nan
+                # For rolling features, use constant values based on recent data
+                # This is a simplification, as we can't properly calculate rolling statistics
+                # for future data
+                recent_values = combined_df['price'].tail(100).values
+                
+                if 'mean' in col:
+                    future_X[col] = np.mean(recent_values)
+                elif 'std' in col:
+                    future_X[col] = np.std(recent_values)
+                elif 'min' in col:
+                    future_X[col] = np.min(recent_values)
+                elif 'max' in col:
+                    future_X[col] = np.max(recent_values)
             else:
-                # For other features, propagate the last value from historical data
-                future_X[col] = features[col].iloc[-1] if col in features.columns else np.nan
-        
-        # Handle any missing features by filling with reasonable values
-        for col in feature_cols:
-            if col not in future_X.columns:
-                future_X[col] = 0
-        
-        # Ensure all feature columns are present
-        missing_cols = set(self.feature_names) - set(future_X.columns)
-        for col in missing_cols:
-            future_X[col] = 0
-        
-        # Return only the columns used during training
-        future_X = future_X[self.feature_names]
+                # For any other feature, use a constant value based on the most recent value
+                if col in features.columns:
+                    future_X[col] = features[col].iloc[-1]
+                else:
+                    # If we don't have the feature, use zeros
+                    future_X[col] = 0
         
         return future_X
     
-    def _forecast_lstm(self, future_features):
-        """Generate forecasts using LSTM model"""
-        # Get scaler and model
-        scaler_X = self.scalers['LSTM']['X']
-        scaler_y = self.scalers['LSTM']['y']
-        model = self.models['LSTM']
+    def _forecast_lstm_future(self, future_features):
+        """Generate future forecasts using LSTM model"""
+        if self.model is None:
+            # If no model is available, return zeros
+            return np.zeros(len(future_features)), np.zeros(len(future_features)), np.zeros(len(future_features))
         
-        # Scale features
-        X_future_scaled = scaler_X.transform(future_features)
+        # Scale features with the same scaler used for training
+        future_scaled = self.scaler_X.transform(future_features)
         
-        # Convert to torch tensor
-        X_future_tensor = torch.FloatTensor(X_future_scaled).to(self.device)
+        # We need to use the last observed values plus the forecasted values
+        # to create the sequence data for prediction
+        predictions = []
+        last_sequence = future_scaled[:self.sequence_length]
         
-        # Generate predictions
-        model.eval()
+        self.model.eval()
         with torch.no_grad():
-            predictions_scaled = model(X_future_tensor.unsqueeze(1))
-            predictions_scaled = predictions_scaled.cpu().numpy()
+            for i in range(len(future_features)):
+                # Get current sequence
+                if i == 0:
+                    # For the first prediction, use the initial sequence
+                    seq = last_sequence
+                else:
+                    # For subsequent predictions, update the sequence by removing the oldest
+                    # and adding the most recent prediction
+                    # This is a simplification - in a real-time system, we'd update with actual values
+                    seq = np.vstack([last_sequence[1:], last_predictions])
+                    last_sequence = seq
+                
+                # Convert to tensor
+                seq_tensor = torch.FloatTensor(seq).unsqueeze(0).to(self.device)
+                
+                # Make prediction
+                pred = self.model(seq_tensor)
+                pred_np = pred.cpu().numpy()
+                
+                # Store prediction
+                predictions.append(pred_np.item())
+                
+                # Update last predictions for next iteration
+                last_predictions = future_scaled[i:i+1]
         
-        # Inverse transform to get actual values
-        predictions = scaler_y.inverse_transform(predictions_scaled).flatten()
+        # Convert predictions to numpy array and inverse transform
+        predictions_scaled = np.array(predictions).reshape(-1, 1)
+        predictions = self.scaler_y.inverse_transform(predictions_scaled).flatten()
         
         # Calculate confidence intervals
         z_score = 1.96  # 95% confidence interval
-        if self.confidence_interval == 80:
-            z_score = 1.28
-        elif self.confidence_interval == 90:
-            z_score = 1.645
-        
-        # Use residuals from training to estimate prediction uncertainty
-        # This is a simplified approach - in practice, prediction intervals for neural networks
-        # would be more complex (e.g., Monte Carlo dropout)
-        std_dev = np.std(predictions) * 0.1  # Simplified estimate
+        std_dev = 0.1 * np.abs(predictions)  # Use 10% of prediction as std dev (simplification)
         lower_bound = predictions - z_score * std_dev
         upper_bound = predictions + z_score * std_dev
-        
-        return predictions, lower_bound, upper_bound
-    
-    def _forecast_xgboost(self, future_features):
-        """Generate forecasts using XGBoost model"""
-        # Get model
-        model = self.models['XGBoost']
-        
-        # Generate predictions
-        predictions = model.predict(future_features)
-        
-        # Calculate confidence intervals based on historical error
-        z_score = 1.96  # 95% confidence interval
-        if self.confidence_interval == 80:
-            z_score = 1.28
-        elif self.confidence_interval == 90:
-            z_score = 1.645
-        
-        # Use prediction standard deviation to estimate uncertainty
-        # Here we're using a simplified approach - in practice, prediction intervals
-        # for tree-based models would be more complex
-        std_dev = np.std(predictions) * 0.15  # Simplified estimate
-        lower_bound = predictions - z_score * std_dev
-        upper_bound = predictions + z_score * std_dev
-        
-        return predictions, lower_bound, upper_bound
-    
-    def _forecast_prophet(self, future_timestamps):
-        """Generate forecasts using Prophet model"""
-        if not prophet_available or 'Prophet' not in self.models:
-            return np.zeros(len(future_timestamps)), np.zeros(len(future_timestamps)), np.zeros(len(future_timestamps))
-        
-        # Get model
-        model = self.models['Prophet']
-        
-        # Create future dataframe
-        future = pd.DataFrame({'ds': future_timestamps})
-        
-        # Generate forecast
-        forecast = model.predict(future)
-        
-        # Extract predictions and confidence intervals
-        predictions = forecast['yhat'].values
-        lower_bound = forecast['yhat_lower'].values
-        upper_bound = forecast['yhat_upper'].values
-        
-        # Check for extreme values in the predictions
-        min_pred = np.min(predictions)
-        max_pred = np.max(predictions)
-        print(f"Prophet future predictions range: min={min_pred}, max={max_pred}")
-        
-        # If predictions are outside a reasonable range, apply correction
-        if min_pred < -1000 or max_pred > 1000:
-            print("WARNING: Future predictions outside normal range, applying correction")
-            
-            # If predictions are extremely large, this indicates a scaling issue
-            if abs(np.mean(predictions)) > 1e10:
-                print(f"Extreme future prediction values detected (mean={np.mean(predictions)})")
-                
-                # For extreme values, create reasonable predictions 
-                # Based on the last few actual values we have seen
-                recent_prices = list(self.recent_actual_prices) if hasattr(self, 'recent_actual_prices') else [-30, -29, -28, -27]
-                
-                # Generate predictions with small random variations based on recent prices
-                avg_price = np.mean(recent_prices)
-                std_price = np.std(recent_prices) if len(recent_prices) > 1 else 1.0
-                
-                # Create predictions that vary slightly around the average of recent prices
-                predictions = np.random.normal(avg_price, std_price * 0.5, len(predictions))
-                
-                # Also correct confidence intervals
-                lower_bound = predictions * 0.9  # 10% below predictions
-                upper_bound = predictions * 1.1  # 10% above predictions
-                
-                print(f"Applied extreme correction, new prediction range: {np.min(predictions)} to {np.max(predictions)}")
         
         return predictions, lower_bound, upper_bound
     

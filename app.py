@@ -136,17 +136,22 @@ with st.sidebar:
         # Convert user-friendly frequency to pandas format
         target_frequency = '5T' if frequency == "5-Minute" else 'H'
         
-        # Model selection
-        st.subheader("Model Configuration")
-        models_to_use = st.multiselect(
-            "Select Models",
-            ["LSTM", "XGBoost", "Prophet", "Ensemble (All)"],
-            default=["Ensemble (All)"]
-        )
+        # Model configuration
+        st.subheader("LSTM Model Configuration")
+        st.info("Using LSTM neural network with 3 layers, 750 hidden units, and 72 time steps.")
         
-        # If no specific model is selected, default to ensemble
-        if not models_to_use:
-            models_to_use = ["Ensemble (All)"]
+        # Information about the model configuration
+        with st.expander("Model Details", expanded=False):
+            st.markdown("""
+            **LSTM Configuration:**
+            - 3 LSTM layers with 750 hidden units each
+            - Input sequence length: 72 time steps
+            - Dropout rate: 0.3
+            - Learning rate scheduler starting at 0.001
+            - 100 training epochs
+            """)
+        
+        # No model selection needed since we only use LSTM
         
         # Confidence interval settings
         conf_interval = st.select_slider(
@@ -273,9 +278,8 @@ if st.session_state.active_tab == "Upload & Forecast":
                         st.write("Feature engineering complete!")
                         
                         # Initialize and train the forecaster
-                        st.write(f"Initializing forecaster with models: {models_to_use}")
+                        st.write("Initializing LSTM forecaster")
                         forecaster = ElectricityPriceForecaster(
-                            models_to_use=models_to_use,
                             forecast_horizon=forecast_days,
                             confidence_interval=conf_interval
                         )
@@ -310,10 +314,8 @@ if st.session_state.active_tab == "Upload & Forecast":
                         
                         if save_forecast_submitted:
                             try:
-                                # Convert models_to_use from list to list of strings if it's not already
-                                models_list = models_to_use
-                                if "Ensemble (All)" in models_list:
-                                    models_list = ["LSTM", "XGBoost", "Prophet", "Ensemble"]
+                                # Use only LSTM model for the database entry
+                                models_list = ["LSTM"]
                                 
                                 # Save forecast to database
                                 forecast_id = database.save_forecast(
