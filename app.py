@@ -18,6 +18,7 @@ from visualization import (
     plot_historical_prices
 )
 from utils import download_csv
+import database
 
 # Set page configuration
 st.set_page_config(
