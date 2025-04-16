@@ -147,6 +147,13 @@ def resample_to_frequency(df, target_freq='H'):
     Returns:
         pd.DataFrame: Dataframe with the target frequency
     """
+    # Make a copy and ensure index is datetime
+    df = df.copy()
+    df.index = pd.to_datetime(df.index)
+    
+    # Sort index to ensure proper resampling
+    df = df.sort_index()
+    
     # Determine current frequency
     inferred_freq = pd.infer_freq(df.index)
     
