@@ -22,11 +22,44 @@ def engineer_features(df):
     if not pd.api.types.is_datetime64_any_dtype(data['timestamp']):
         data['timestamp'] = pd.to_datetime(data['timestamp'])
     
+    # Determine the frequency by checking the most common time delta between adjacent rows
+    try:
+        deltas = pd.Series(data['timestamp'].diff().dropna().dt.total_seconds())
+        most_common_delta = deltas.value_counts().idxmax()
+        if most_common_delta == 300:  # 5 minutes = 300 seconds
+            frequency = '5T'
+            periods_per_hour = 12
+            periods_per_day = 288  # 24 hours * 12 periods per hour
+        else:
+            frequency = 'H'
+            periods_per_hour = 1
+            periods_per_day = 24  # 24 hours per day
+    except:
+        # Default to hourly if we can't determine frequency
+        frequency = 'H'
+        periods_per_hour = 1
+        periods_per_day = 24
+    
+    print(f"Detected data frequency: {frequency}, with {periods_per_day} periods per day")
+    
+    # Store the frequency metadata in a dictionary to pass to other functions
+    freq_info = {
+        'frequency': frequency,
+        'periods_per_hour': periods_per_hour,
+        'periods_per_day': periods_per_day
+    }
+    
     # Set timestamp as index for easier time-based operations
     data.set_index('timestamp', inplace=True)
     
     # Create basic temporal features
     features = create_temporal_features(data)
+    
+    # Attach frequency info to the features dataframe as a metadata attribute
+    # This allows other functions to read the frequency without recalculating
+    features.attrs['frequency'] = frequency
+    features.attrs['periods_per_hour'] = periods_per_hour
+    features.attrs['periods_per_day'] = periods_per_day
     
     # Create lagged features
     features = create_lagged_features(features)
@@ -106,16 +139,43 @@ def create_lagged_features(df):
     """
     features = df.copy()
     
-    # Create lagged features (previous hours)
-    for lag in [1, 3, 6, 12, 24]:
-        features[f'price_lag_{lag}h'] = features['price'].shift(lag)
+    # Determine frequency of data to set appropriate lags
+    # Try to infer from the index
+    try:
+        # Get the most common time difference between consecutive timestamps
+        deltas = pd.Series(pd.to_datetime(features.index).to_series().diff().dropna().dt.total_seconds())
+        most_common_delta = deltas.value_counts().idxmax()
+        
+        # Calculate periods per hour and day for the detected frequency
+        if most_common_delta == 300:  # 5 minutes
+            periods_per_hour = 12
+            periods_per_day = 288  # 24 hours * 12 periods per hour
+            frequency = '5T'
+        else:  # Default to hourly
+            periods_per_hour = 1
+            periods_per_day = 24
+            frequency = 'H'
+    except:
+        # Default to hourly if inference fails
+        periods_per_hour = 1
+        periods_per_day = 24
+        frequency = 'H'
     
-    # Create day-of-week lags (same hour last week, two weeks ago)
-    for lag in [24*7, 24*14]:
-        features[f'price_lag_{lag//24}d'] = features['price'].shift(lag)
+    print(f"Creating lagged features with detected frequency: {frequency} ({periods_per_day} periods per day)")
     
-    # Create month lag (same hour one month ago - approximate)
-    features['price_lag_30d'] = features['price'].shift(24*30)
+    # Create lagged features scaled by frequency
+    # Convert concepts of hours to periods
+    for hours in [1, 3, 6, 12, 24]:
+        lag_periods = hours * periods_per_hour
+        features[f'price_lag_{hours}h'] = features['price'].shift(lag_periods)
+    
+    # Create day-of-week lags (same time last week, two weeks ago)
+    for days in [7, 14]:
+        lag_periods = days * periods_per_day
+        features[f'price_lag_{days}d'] = features['price'].shift(lag_periods)
+    
+    # Create month lag (same time one month ago - approximate)
+    features['price_lag_30d'] = features['price'].shift(30 * periods_per_day)
     
     return features
 
@@ -131,23 +191,54 @@ def create_rolling_features(df):
     """
     features = df.copy()
     
-    # Create rolling window statistics
-    for window in [24, 24*7, 24*30]:  # 1 day, 1 week, 1 month
-        window_name = f"{window//24}d" if window >= 24 else f"{window}h"
+    # Determine frequency of data to set appropriate window sizes
+    # Try to infer from the index
+    try:
+        # Get the most common time difference between consecutive timestamps
+        deltas = pd.Series(pd.to_datetime(features.index).to_series().diff().dropna().dt.total_seconds())
+        most_common_delta = deltas.value_counts().idxmax()
+        
+        # Calculate periods per day for the detected frequency
+        if most_common_delta == 300:  # 5 minutes
+            periods_per_hour = 12
+            periods_per_day = 288  # 24 hours * 12 periods per hour
+            frequency = '5T'
+        else:  # Default to hourly
+            periods_per_hour = 1
+            periods_per_day = 24
+            frequency = 'H'
+    except:
+        # Default to hourly if inference fails
+        periods_per_hour = 1
+        periods_per_day = 24
+        frequency = 'H'
+    
+    print(f"Creating rolling features with detected frequency: {frequency} ({periods_per_day} periods per day)")
+    
+    # Define window sizes in terms of periods
+    windows = [
+        (1, periods_per_day),  # 1 day
+        (7, periods_per_day * 7),  # 1 week
+        (30, periods_per_day * 30)  # 1 month (approximate)
+    ]
+    
+    # Create rolling window statistics scaled by frequency
+    for day_count, window_size in windows:
+        window_name = f"{day_count}d"
         
         # Mean
         features[f'price_rolling_mean_{window_name}'] = features['price'].rolling(
-            window=window, min_periods=1).mean()
+            window=window_size, min_periods=1).mean()
         
         # Standard deviation
         features[f'price_rolling_std_{window_name}'] = features['price'].rolling(
-            window=window, min_periods=1).std()
+            window=window_size, min_periods=1).std()
         
         # Min/Max
         features[f'price_rolling_min_{window_name}'] = features['price'].rolling(
-            window=window, min_periods=1).min()
+            window=window_size, min_periods=1).min()
         features[f'price_rolling_max_{window_name}'] = features['price'].rolling(
-            window=window, min_periods=1).max()
+            window=window_size, min_periods=1).max()
         
         # Range (max - min)
         features[f'price_rolling_range_{window_name}'] = (
@@ -170,15 +261,38 @@ def decompose_time_series(df):
     try:
         from statsmodels.tsa.seasonal import seasonal_decompose
         
+        # Determine frequency of data to set appropriate decomposition period
+        try:
+            # Get the most common time difference between consecutive timestamps
+            deltas = pd.Series(pd.to_datetime(df.index).to_series().diff().dropna().dt.total_seconds())
+            most_common_delta = deltas.value_counts().idxmax()
+            
+            # Calculate periods per day for the detected frequency
+            if most_common_delta == 300:  # 5 minutes
+                periods_per_day = 288  # 24 hours * 12 periods per hour
+                # Weekly seasonality for 5-minute data (288 periods per day * 7 days)
+                seasonality_period = periods_per_day * 7
+            else:  # Default to hourly
+                periods_per_day = 24
+                # Weekly seasonality for hourly data (24 periods per day * 7 days)
+                seasonality_period = periods_per_day * 7
+        except:
+            # Default to hourly if inference fails
+            periods_per_day = 24
+            seasonality_period = periods_per_day * 7
+        
+        print(f"Using time series decomposition with seasonality period: {seasonality_period}")
+        
         # Check if we have enough data for decomposition (at least 2 full periods)
-        if len(df) < 2 * 24 * 7:  # 2 weeks of hourly data
+        if len(df) < 2 * seasonality_period:
+            print(f"Not enough data for decomposition: {len(df)} points, need at least {2 * seasonality_period}")
             return None
         
         # Perform decomposition
         result = seasonal_decompose(
             df['price'], 
             model='additive', 
-            period=24*7,  # Weekly seasonality for hourly data
+            period=seasonality_period,
             extrapolate_trend='freq'
         )
         
@@ -238,6 +352,26 @@ def add_external_features(features_df, data_df):
     """
     features = features_df.copy()
     
+    # Determine frequency of data to set appropriate window sizes
+    try:
+        # Get the most common time difference between consecutive timestamps
+        deltas = pd.Series(pd.to_datetime(data_df.index).to_series().diff().dropna().dt.total_seconds())
+        most_common_delta = deltas.value_counts().idxmax()
+        
+        # Calculate periods per day for the detected frequency
+        if most_common_delta == 300:  # 5 minutes
+            periods_per_hour = 12
+            periods_per_day = 288  # 24 hours * 12 periods per hour
+        else:  # Default to hourly
+            periods_per_hour = 1
+            periods_per_day = 24
+    except:
+        # Default to hourly if inference fails
+        periods_per_hour = 1
+        periods_per_day = 24
+    
+    print(f"Creating external features with {periods_per_day} periods per day")
+    
     # List of potential external features to check
     external_features = [
         'temperature', 'wind_speed', 'solar_irradiance', 
@@ -249,11 +383,13 @@ def add_external_features(features_df, data_df):
         if feature in data_df.columns:
             features[feature] = data_df[feature]
             
-            # Create rolling statistics for each external feature
-            features[f'{feature}_rolling_mean_1d'] = data_df[feature].rolling(window=24, min_periods=1).mean()
-            features[f'{feature}_rolling_std_1d'] = data_df[feature].rolling(window=24, min_periods=1).std()
+            # Create rolling statistics for each external feature (1 day window)
+            features[f'{feature}_rolling_mean_1d'] = data_df[feature].rolling(
+                window=periods_per_day, min_periods=1).mean()
+            features[f'{feature}_rolling_std_1d'] = data_df[feature].rolling(
+                window=periods_per_day, min_periods=1).std()
             
-            # Create lag features for external variables
-            features[f'{feature}_lag_24h'] = data_df[feature].shift(24)
+            # Create lag features for external variables (24 hour lag)
+            features[f'{feature}_lag_24h'] = data_df[feature].shift(periods_per_day)
     
     return features
