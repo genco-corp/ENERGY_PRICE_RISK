@@ -120,6 +120,22 @@ with st.sidebar:
         st.subheader("Forecast Parameters")
         forecast_days = st.slider("Forecast Horizon (days)", 1, 30, 7)
         
+        # Data frequency selection
+        frequency = st.radio(
+            "Data Frequency",
+            ["Hourly (default)", "5-Minute"],
+            index=0,
+            help="""Choose the frequency for data analysis:
+            - Hourly: Standard resolution for long-term forecasting
+            - 5-Minute: Higher resolution for more detailed short-term forecasting
+            
+            The original data will be automatically resampled to this frequency.
+            If your original data is at a different frequency, the system will intelligently interpolate or aggregate as needed."""
+        )
+        
+        # Convert user-friendly frequency to pandas format
+        target_frequency = '5T' if frequency == "5-Minute" else 'H'
+        
         # Model selection
         st.subheader("Model Configuration")
         models_to_use = st.multiselect(
@@ -209,8 +225,10 @@ if st.session_state.active_tab == "Upload & Forecast":
     if st.session_state.data is not None and 'train_button' in locals() and train_button:
         with st.spinner("Processing data and training models..."):
             try:
-                # Preprocess the data
-                processed_data = preprocess_data(st.session_state.data)
+                # Preprocess the data with selected frequency
+                # Get the target frequency from session state or use hourly as default
+                target_frequency = '5T' if 'frequency' in locals() and frequency == "5-Minute" else 'H'
+                processed_data = preprocess_data(st.session_state.data, target_frequency)
                 st.session_state.processed_data = processed_data
                 
                 # Engineer features
@@ -464,7 +482,9 @@ elif st.session_state.active_tab == "Saved Forecasts":
                         selected_forecast = next((f for f in forecasts if f.id == selected_forecast_id), None)
                         if selected_forecast:
                             data = database.get_dataset_data(selected_forecast.dataset_id)
-                            processed_data = preprocess_data(data)
+                            # Determine which frequency was used in the original forecast
+                            # For now, just default to hourly since we don't store frequency in the database
+                            processed_data = preprocess_data(data, 'H')
                             
                             # Set session state
                             st.session_state.data = data
@@ -524,7 +544,9 @@ elif st.session_state.active_tab == "Upload & Forecast" and st.session_state.dat
     2. Configure the forecast parameters in the sidebar
     3. Click on "Train Models & Generate Forecast" to see the results
     
-    For optimal forecasting performance, provide at least 1 year of hourly data.
+    For optimal forecasting performance, provide at least 1 year of data.
+    
+    **New Feature**: The application now supports both hourly and 5-minute frequency data!
     
     You can also load previously saved datasets from the "Saved Datasets" tab.
     """)

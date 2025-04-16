@@ -56,12 +56,13 @@ def validate_data(data):
     
     return True, "Data validation successful."
 
-def preprocess_data(data):
+def preprocess_data(data, target_frequency='H'):
     """
     Preprocesses the input data for forecasting.
     
     Args:
         data (pd.DataFrame): Input data with at least 'timestamp' and 'price' columns
+        target_frequency (str): Target frequency for resampling ('H' for hourly, '5T' for 5-minute)
         
     Returns:
         pd.DataFrame: Preprocessed data ready for feature engineering
@@ -91,9 +92,10 @@ def preprocess_data(data):
     # Handle missing values
     df = handle_missing_values(df)
     
-    # Resample to hourly frequency if needed
-    if df.index.inferred_freq != 'H':
-        df = resample_to_hourly(df)
+    # Resample to target frequency if needed
+    current_freq = pd.infer_freq(df.index)
+    if current_freq != target_frequency:
+        df = resample_to_frequency(df, target_frequency)
     
     # Handle outliers
     df = handle_outliers(df)
@@ -134,9 +136,63 @@ def handle_missing_values(df):
     
     return df
 
+def resample_to_frequency(df, target_freq='H'):
+    """
+    Resamples data to the target frequency.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with timestamp index
+        target_freq (str): Target frequency ('H' for hourly, '5T' for 5 minutes)
+        
+    Returns:
+        pd.DataFrame: Dataframe with the target frequency
+    """
+    # Determine current frequency
+    inferred_freq = pd.infer_freq(df.index)
+    
+    # If target frequency is hourly
+    if target_freq == 'H':
+        # If frequency is finer than hourly (e.g., 15min or 5min), resample to hourly
+        if inferred_freq is not None and inferred_freq[-1] not in ['H', 'D']:
+            df = df.resample('H').mean()
+        # If frequency is larger than hourly (e.g., daily), interpolate to hourly
+        elif inferred_freq is not None and inferred_freq[-1] == 'D':
+            df = df.resample('H').interpolate(method='time')
+    
+    # If target frequency is 5-minute
+    elif target_freq == '5T':
+        # If frequency is coarser than 5min (e.g., hourly), interpolate to 5min
+        if inferred_freq is not None and (inferred_freq[-1] in ['H', 'D'] or
+                                        (inferred_freq[-1] == 'T' and int(inferred_freq[:-1]) > 5)):
+            df = df.resample('5T').interpolate(method='time')
+        # If frequency is finer than 5min, resample to 5min
+        elif inferred_freq is not None and inferred_freq[-1] == 'T' and int(inferred_freq[:-1]) < 5:
+            df = df.resample('5T').mean()
+    
+    # If current frequency couldn't be determined, force to target frequency
+    elif inferred_freq is None:
+        # First check the average time difference
+        avg_diff = (df.index[-1] - df.index[0]) / len(df)
+        
+        if target_freq == 'H' and avg_diff < pd.Timedelta(hours=1):
+            # Data appears to be sub-hourly, resample to hourly
+            df = df.resample('H').mean()
+        elif target_freq == '5T' and avg_diff < pd.Timedelta(minutes=5):
+            # Data appears to be sub-5-minute, resample to 5-minute
+            df = df.resample('5T').mean()
+        elif target_freq == 'H' and avg_diff > pd.Timedelta(hours=1):
+            # Data appears to be coarser than hourly, interpolate to hourly
+            df = df.resample('H').interpolate(method='time')
+        elif target_freq == '5T' and avg_diff > pd.Timedelta(minutes=5):
+            # Data appears to be coarser than 5-minute, interpolate to 5-minute
+            df = df.resample('5T').interpolate(method='time')
+    
+    return df
+
+# Keep the original function for backward compatibility
 def resample_to_hourly(df):
     """
-    Resamples data to hourly frequency if needed.
+    Resamples data to hourly frequency if needed (legacy function).
     
     Args:
         df (pd.DataFrame): Input dataframe with timestamp index
@@ -144,17 +200,7 @@ def resample_to_hourly(df):
     Returns:
         pd.DataFrame: Dataframe with hourly frequency
     """
-    # Determine current frequency
-    inferred_freq = pd.infer_freq(df.index)
-    
-    # If frequency is finer than hourly (e.g., 15min), resample to hourly
-    if inferred_freq is not None and inferred_freq[-1] not in ['H', 'D']:
-        df = df.resample('H').mean()
-    # If frequency is larger than hourly (e.g., daily), interpolate to hourly
-    elif inferred_freq is not None and inferred_freq[-1] == 'D':
-        df = df.resample('H').interpolate(method='time')
-    
-    return df
+    return resample_to_frequency(df, 'H')
 
 def handle_outliers(df):
     """
