@@ -538,9 +538,7 @@ elif st.session_state.active_tab == "Saved Forecasts":
                             st.session_state.forecast_id = selected_forecast_id
                             
                             # Initialize a forecaster object with the loaded parameters
-                            models_list = selected_forecast.models_used.split(',')
                             forecaster = ElectricityPriceForecaster(
-                                models_to_use=models_list,
                                 forecast_horizon=selected_forecast.forecast_horizon,
                                 confidence_interval=selected_forecast.confidence_interval
                             )
