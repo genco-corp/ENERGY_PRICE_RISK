@@ -82,9 +82,7 @@ class ForecastData(Base):
 # Database connection
 def get_engine():
     """Create and return a database engine using environment variables"""
-    database_url = os.environ.get('DATABASE_URL')
-    if not database_url:
-        raise ValueError("DATABASE_URL environment variable is not set")
+    database_url = os.environ.get('DATABASE_URL', 'sqlite:///electricity_forecasting.db')
     
     return create_engine(database_url)
 

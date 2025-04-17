@@ -9,7 +9,16 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
 import warnings
 from datetime import timedelta
+from torch.cuda.amp import autocast, GradScaler
 warnings.filterwarnings('ignore')
+
+def get_device():
+    """Get the appropriate device for PyTorch operations"""
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
 
 # Add debug function for tracking dataframe issues
 def print_debug(message, df=None):
@@ -64,11 +73,16 @@ class LSTMModel(nn.Module):
         # Fully connected layer
         self.fc = nn.Linear(hidden_dim, output_dim)
     
+    @torch.no_grad()
+    def init_hidden(self, batch_size, device):
+        """Initialize hidden states with memory optimization"""
+        return (torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=device),
+                torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=device))
+    
     def forward(self, x):
         """Forward pass through the network"""
-        # Initialize hidden state with zeros
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
+        # Initialize hidden state with zeros using optimized method
+        h0, c0 = self.init_hidden(x.size(0), x.device)
         
         # Forward propagate LSTM
         out, _ = self.lstm(x, (h0, c0))
@@ -99,7 +113,7 @@ class ElectricityPriceForecaster:
         """
         self.forecast_horizon = forecast_horizon
         self.confidence_interval = confidence_interval
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = get_device()
         
         # LSTM uses fixed sequence length of 72 time steps
         self.sequence_length = 72
@@ -110,6 +124,14 @@ class ElectricityPriceForecaster:
         self.scaler_y = None
         self.recent_actual_prices = []
         self.feature_names = []
+        
+        # Initialize gradient scaler for mixed precision training
+        self.scaler = GradScaler()
+        
+        # Early stopping parameters
+        self.patience = 5
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
     
     def train_and_forecast(self, features, prices):
         """
@@ -257,7 +279,7 @@ class ElectricityPriceForecaster:
         
         # Create dataset and dataloader for batch training
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)  # Increased batch size for M1
         
         # Define and initialize the model
         input_dim = X_train_scaled.shape[1]
@@ -273,12 +295,15 @@ class ElectricityPriceForecaster:
         criterion = nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         
-        # Learning rate scheduler - reduce LR by 0.1 every 30 epochs
+        # Learning rate scheduler
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
         
-        # Training loop - increased to 100 epochs
+        # Training loop with early stopping
         epochs = 100
+        val_losses = []
+        
         print(f"Training LSTM model on {epochs} epochs with {len(train_loader)} batches per epoch")
+        print(f"Using device: {self.device}")
         
         for epoch in range(epochs):
             self.model.train()
@@ -287,69 +312,65 @@ class ElectricityPriceForecaster:
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 
-                # Forward pass
-                outputs = self.model(X_batch)
-                loss = criterion(outputs, y_batch)
+                # Mixed precision training
+                with autocast(device_type=self.device.type):
+                    outputs = self.model(X_batch)
+                    loss = criterion(outputs, y_batch)
                 
-                # Backward pass and optimize
+                # Backward pass with gradient scaling
+                self.scaler.scale(loss).backward()
+                
+                # Gradient clipping
+                self.scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                # Optimizer step with gradient scaling
+                self.scaler.step(optimizer)
+                self.scaler.update()
+                
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
                 
                 total_loss += loss.item()
             
             # Update learning rate
             scheduler.step()
             
+            # Calculate validation loss
+            val_loss = self._validate_model(X_test_scaled, test_data['y'].values)
+            val_losses.append(val_loss)
+            
+            # Early stopping check
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+                if self.patience_counter >= self.patience:
+                    print(f"Early stopping triggered at epoch {epoch+1}")
+                    break
+            
             # Print progress
             if (epoch + 1) % 10 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss/len(train_loader):.6f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+                print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss/len(train_loader):.6f}, "
+                      f"Val Loss: {val_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.6f}")
         
         # Generate predictions on test data
-        self.model.eval()
-        
-        # We need to create sequences from the test data
-        # For simplicity, we'll use the last sequence_length elements from training data + test data
-        full_X = np.vstack([X_train_scaled[-self.sequence_length:], X_test_scaled])
-        predictions = []
-        
-        with torch.no_grad():
-            for i in range(len(X_test_scaled)):
-                # Get sequence
-                seq = full_X[i:i+self.sequence_length]
-                seq_tensor = torch.FloatTensor(seq).unsqueeze(0).to(self.device)
-                
-                # Generate prediction
-                pred = self.model(seq_tensor)
-                predictions.append(pred.item())
-                
-                # Update full_X with the prediction (if needed for next iteration)
-                if i + self.sequence_length < len(full_X):
-                    # We won't actually use this prediction in the next sequence
-                    # This is just to demonstrate how it would work in a recurrent fashion
-                    pass
-        
-        # Convert predictions to numpy array and inverse transform
-        predictions_scaled = np.array(predictions).reshape(-1, 1)
-        predictions = self.scaler_y.inverse_transform(predictions_scaled).flatten()
-        
-        # Create forecast dataframe
-        forecast_df = pd.DataFrame({
-            'timestamp': test_data['timestamps'],
-            'actual': test_data['y'].values,
-            'predicted': predictions
-        })
-        
-        # Calculate confidence intervals
-        z_score = 1.96  # 95% confidence interval
-        std_dev = np.std(forecast_df['actual'] - forecast_df['predicted'])
-        forecast_df['lower'] = forecast_df['predicted'] - z_score * std_dev
-        forecast_df['upper'] = forecast_df['predicted'] + z_score * std_dev
-        
-        # Calculate error metrics
-        error_metrics = self._calculate_metrics(forecast_df['actual'], forecast_df['predicted'])
+        forecast_df, error_metrics = self._generate_forecast(test_data, X_test_scaled)
         
         return forecast_df, error_metrics
+    
+    def _validate_model(self, X_test_scaled, y_test):
+        """Calculate validation loss"""
+        self.model.eval()
+        with torch.no_grad():
+            X_test_seq, _ = self._prepare_sequence_data(X_test_scaled, y_test, self.sequence_length)
+            X_test_tensor = torch.FloatTensor(X_test_seq).to(self.device)
+            
+            with autocast(device_type=self.device.type):
+                outputs = self.model(X_test_tensor)
+                loss = nn.MSELoss()(outputs, torch.FloatTensor(y_test[self.sequence_length:]).reshape(-1, 1).to(self.device))
+            
+            return loss.item()
     
     def _extend_forecast(self, forecast_df, features):
         """Extend forecast to cover the full forecast horizon"""
@@ -604,6 +625,47 @@ class ElectricityPriceForecaster:
         upper_bound = predictions + z_score * std_dev
         
         return predictions, lower_bound, upper_bound
+    
+    def _generate_forecast(self, test_data, X_test_scaled):
+        """Generate forecasts using the trained model"""
+        self.model.eval()
+        
+        # Create sequences from the test data
+        full_X = np.vstack([X_test_scaled[-self.sequence_length:], X_test_scaled])
+        predictions = []
+        
+        with torch.no_grad():
+            for i in range(len(X_test_scaled)):
+                # Get sequence
+                seq = full_X[i:i+self.sequence_length]
+                seq_tensor = torch.FloatTensor(seq).unsqueeze(0).to(self.device)
+                
+                # Generate prediction with mixed precision
+                with autocast(device_type=self.device.type):
+                    pred = self.model(seq_tensor)
+                predictions.append(pred.item())
+        
+        # Convert predictions to numpy array and inverse transform
+        predictions_scaled = np.array(predictions).reshape(-1, 1)
+        predictions = self.scaler_y.inverse_transform(predictions_scaled).flatten()
+        
+        # Create forecast dataframe
+        forecast_df = pd.DataFrame({
+            'timestamp': test_data['timestamps'],
+            'actual': test_data['y'].values,
+            'predicted': predictions
+        })
+        
+        # Calculate confidence intervals
+        z_score = 1.96  # 95% confidence interval
+        std_dev = np.std(forecast_df['actual'] - forecast_df['predicted'])
+        forecast_df['lower'] = forecast_df['predicted'] - z_score * std_dev
+        forecast_df['upper'] = forecast_df['predicted'] + z_score * std_dev
+        
+        # Calculate error metrics
+        error_metrics = self._calculate_metrics(forecast_df['actual'], forecast_df['predicted'])
+        
+        return forecast_df, error_metrics
     
     def _calculate_metrics(self, actual, predicted):
         """Calculate forecast error metrics"""

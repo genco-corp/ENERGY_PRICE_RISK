@@ -1,0 +1,10 @@
+numpy==1.26.4
+pandas<2.1.0
+plotly>=5.0.0
+psycopg2-binary>=2.9.0
+scikit-learn<1.4.0
+sqlalchemy>=2.0.0
+statsmodels<0.15.0
+streamlit>=1.28.0,<1.41.0
+torch>=2.0.0,<2.7.0
+python-dotenv>=1.0.0 

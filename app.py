@@ -6,6 +6,10 @@ import io
 import os
 import datetime
 from datetime import timedelta
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from data_processing import preprocess_data, validate_data
 from feature_engineering import engineer_features

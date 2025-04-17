@@ -1,0 +1,6 @@
+services:
+  featureinsightengine:
+    image: featureinsightengine
+    build:
+      context: .
+      dockerfile: ./Dockerfile
